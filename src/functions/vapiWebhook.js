@@ -1,121 +1,150 @@
-const { app } = require("@azure/functions");
+const { app } = require('@azure/functions');
 
-app.http("vapiWebhook", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  handler: async (request, context) => {
-    context.log("Vapi Webhook triggered.");
+app.http('vapiWebhook', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    handler: async (request, context) => {
+        context.log('Vapi Webhook triggered.');
 
-    try {
-      // STEP 1: Parse Payload
-      const body = await request.json();
-      const eventType = body.message?.type;
+        try {
+            const body = await request.json();
+            const eventType = body.message?.type;
+            const callerNumber = body.message.call?.customer?.number;
+            
+            // --- 1. AUTHENTICATE WITH MICROSOFT ENTRA ID ---
+            const tokenResponse = await fetch(`https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'client_credentials',
+                    client_id: process.env.CLIENT_ID,
+                    client_secret: process.env.CLIENT_SECRET,
+                    scope: 'https://graph.microsoft.com/.default'
+                })
+            });
 
-      if (eventType !== "assistant-request") {
-        return { status: 200, jsonBody: { message: "Event ignored" } };
-      }
+            const tokenData = await tokenResponse.json();
+            const accessToken = tokenData.access_token;
 
-      const callerNumber = body.message.call?.customer?.number;
-      context.log(`Incoming call from: ${callerNumber}`);
+            // --- 2. FETCH CALLER IDENTITY & ROLE ---
+            let employeeName = "Employee";
+            let jobTitle = "";
 
-      if (!callerNumber) {
-        return { status: 400, jsonBody: { error: "Missing caller number" } };
-      }
+            if (callerNumber) {
+                const encodedNumber = encodeURIComponent(callerNumber);
+                const userQueryUrl = `https://graph.microsoft.com/v1.0/users?$filter=mobilePhone eq '${encodedNumber}' or businessPhones/any(p:p eq '${encodedNumber}')&$select=displayName,jobTitle&$count=true`;
 
-      // STEP 2: Fetch Entra ID Token
-      const tenantId = process.env.TENANT_ID;
-      const clientId = process.env.CLIENT_ID;
-      const clientSecret = process.env.CLIENT_SECRET;
+                const userResponse = await fetch(userQueryUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'ConsistencyLevel': 'eventual'
+                    }
+                });
 
-      const tokenResponse = await fetch(
-        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "client_credentials",
-            client_id: clientId,
-            client_secret: clientSecret,
-            scope: "https://graph.microsoft.com/.default",
-          }),
-        },
-      );
+                const userData = await userResponse.json();
+                if (userData.value && userData.value.length > 0) {
+                    employeeName = userData.value[0].displayName || "Employee";
+                    jobTitle = (userData.value[0].jobTitle || "").toLowerCase();
+                } else {
+                    return { status: 200, jsonBody: { error: "Access denied. Number not found in Entra ID." } };
+                }
+            }
 
-      if (!tokenResponse.ok) {
-        return { status: 500, jsonBody: { error: "Entra ID auth failed" } };
-      }
+            // --- EVENT A: INCOMING CALL (SETUP ASSISTANT) ---
+            if (eventType === 'assistant-request') {
+                return {
+                    status: 200,
+                    jsonBody: {
+                        assistant: {
+                            name: "Enterprise Agent",
+                            firstMessage: `Authentication successful. Welcome, ${employeeName}. I can answer questions about your company policies. How can I help you today?`,
+                            model: {
+                                provider: "openai",
+                                model: "gpt-4o",
+                                messages: [
+                                    {
+                                        role: "system",
+                                        content: "You are a corporate assistant. Use the search_sharepoint tool to answer questions. If the tool returns no information, state: 'Sorry, I am unable to find an answer to your question in your permitted files.' Never invent answers."
+                                    }
+                                ],
+                                tools: [{
+                                    type: "function",
+                                    function: {
+                                        name: "search_sharepoint",
+                                        description: "Searches the permitted SharePoint policy documents.",
+                                        parameters: {
+                                            type: "object",
+                                            properties: { query: { type: "string", description: "The search keywords." } },
+                                            required: ["query"]
+                                        }
+                                    }
+                                }]
+                            }
+                        }
+                    }
+                };
+            }
 
-      const tokenData = await tokenResponse.json();
-      const accessToken = tokenData.access_token;
+            // --- EVENT B: AI USES THE SEARCH TOOL ---
+            if (eventType === 'tool-calls') {
+                const toolCall = body.message.toolCalls[0];
+                
+                if (toolCall.function.name === 'search_sharepoint') {
+                    const searchQuery = JSON.parse(toolCall.function.arguments).query;
+                    
+                    // RBAC: Build the allowed folders list based on the caller's job title
+                    let allowedPaths = `path:"${process.env.SP_GENERAL_FOLDER}"`;
+                    
+                    if (jobTitle.includes("manager")) {
+                        allowedPaths += ` OR path:"${process.env.SP_MANAGER_FOLDER}"`;
+                    }
+                    if (jobTitle.includes("sales")) {
+                        allowedPaths += ` OR path:"${process.env.SP_SALES_FOLDER}"`;
+                    }
 
-      // STEP 3: Query Microsoft Graph API
-      const encodedNumber = encodeURIComponent(callerNumber);
+                    // Execute Microsoft Graph Search
+                    const searchApiUrl = 'https://graph.microsoft.com/v1.0/search/query';
+                    const searchResponse = await fetch(searchApiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${accessToken}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            requests: [{
+                                entityTypes: ["driveItem"],
+                                query: { queryString: `${searchQuery} AND (${allowedPaths})` }
+                            }]
+                        })
+                    });
 
-      // 1. Add &$count=true to the end of the URL
-      const graphQueryUrl = `https://graph.microsoft.com/v1.0/users?$filter=mobilePhone eq '${encodedNumber}' or businessPhones/any(p:p eq '${encodedNumber}')&$select=displayName,jobTitle&$count=true`;
+                    const searchData = await searchResponse.json();
+                    let snippets = "No information found in the allowed policy documents.";
 
-      context.log(`Querying Graph API for: ${callerNumber}`);
+                    // Extract the text summaries if Microsoft found a match
+                    if (searchData.value && searchData.value[0].hitsContainers[0].hits) {
+                        const hits = searchData.value[0].hitsContainers[0].hits;
+                        snippets = hits.map(hit => hit.summary).join("\n\n");
+                    }
 
-      const graphResponse = await fetch(graphQueryUrl, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          ConsistencyLevel: "eventual", // 2. Required header for advanced filtering
-        },
-      });
+                    return {
+                        status: 200,
+                        jsonBody: {
+                            results: [{
+                                toolCallId: toolCall.id,
+                                result: snippets
+                            }]
+                        }
+                    };
+                }
+            }
 
-      if (!graphResponse.ok) {
-        const graphError = await graphResponse.text();
-        context.log(`Graph API error: ${graphError}`);
-        return { status: 500, jsonBody: { error: "Graph API query failed" } };
-      }
+            return { status: 200, jsonBody: { message: "Event ignored" } };
 
-      const graphData = await graphResponse.json();
-      const users = graphData.value;
-
-      // STEP 4: Return Dynamic Vapi Response
-      if (users && users.length > 0) {
-        const employeeName = users[0].displayName || "Employee";
-        context.log(`Authorized caller identified: ${employeeName}`);
-
-        // Proceed with a transient assistant configuration
-        return {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-          jsonBody: {
-            assistant: {
-              name: "Employee IT Portal",
-              firstMessage: `Authentication successful. Welcome to the corporate network, ${employeeName}. How can assistance be provided today?`,
-              model: {
-                provider: "openai",
-                model: "gpt-4o",
-                messages: [
-                  {
-                    role: "system",
-                    content: `The assistant is an internal IT support agent for ${employeeName}.`,
-                  },
-                ],
-              },
-            },
-          },
-        };
-      } else {
-        context.log(`Unauthorized caller: ${callerNumber}. Rejecting call.`);
-
-        // Reject spam callers with a spoken error message
-        return {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-          jsonBody: {
-            error:
-              "Access denied. The phone number is not recognized in the directory. Goodbye.",
-          },
-        };
-      }
-    } catch (error) {
-      context.log(`Error: ${error.message}`);
-      return { status: 500, jsonBody: { error: error.message } };
+        } catch (error) {
+            context.log(`Error: ${error.message}`);
+            return { status: 500, jsonBody: { error: error.message } };
+        }
     }
-  },
 });

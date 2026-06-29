@@ -30,9 +30,8 @@ async function listAllEmployees() {
     const accessToken = tokenData.access_token;
     console.log("Token secured. Fetching users...\n");
 
-    // 2. Fetch the Users
-    // Using $select to pull specific useful fields. 
-    const graphUrl = `https://graph.microsoft.com/v1.0/users?$select=displayName,userPrincipalName,mobilePhone,businessPhones`;
+    // 2. Fetch the Users (Added jobTitle to the $select parameters)
+    const graphUrl = `https://graph.microsoft.com/v1.0/users?$select=displayName,userPrincipalName,mobilePhone,businessPhones,jobTitle`;
 
     const graphResponse = await fetch(graphUrl, {
         method: 'GET',
@@ -55,8 +54,10 @@ async function listAllEmployees() {
     users.forEach((user, index) => {
         const mobile = user.mobilePhone || "N/A";
         const business = (user.businessPhones && user.businessPhones.length > 0) ? user.businessPhones[0] : "N/A";
+        const title = user.jobTitle || "No Title Assigned"; // Fallback if blank
         
         console.log(`[${index + 1}] Name: ${user.displayName}`);
+        console.log(`    Role / Job Title: ${title}`); // Added role printing
         console.log(`    Email:  ${user.userPrincipalName}`);
         console.log(`    Mobile: ${mobile} | Business: ${business}`);
         console.log("-----------------------------------------------------------");
