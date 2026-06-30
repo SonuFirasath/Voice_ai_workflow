@@ -1,2 +1,5 @@
 .vscode/
 node_modules/
+graphify-out/
+.claude/
+CLAUDE.md
