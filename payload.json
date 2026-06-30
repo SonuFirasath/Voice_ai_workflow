@@ -1,0 +1,20 @@
+{
+  "message": {
+    "type": "tool-calls",
+    "call": {
+      "customer": {
+        "number": ""
+      }
+    },
+    "toolCallList": [
+      {
+        "id": "call_123",
+        "type": "function",
+        "function": {
+          "name": "search_sharepoint",
+          "arguments": "{\"query\":\"brand promise\"}"
+        }
+      }
+    ]
+  }
+}
