@@ -1,3 +1,5 @@
+// src/functions/vapiWebhook.js
+
 const { app } = require('@azure/functions');
 const { getAccessToken }       = require('../lib/auth');
 const { lookupCaller }         = require('../lib/identity');
@@ -8,92 +10,161 @@ app.http('vapiWebhook', {
     methods: ['POST'],
     authLevel: 'anonymous',
     handler: async (request, context) => {
-        context.log('Vapi Webhook triggered.');
+        context.log('[WEBHOOK] Vapi Webhook triggered.');
 
         try {
             const body          = await request.json();
             const eventType     = body.message?.type;
             const callerNumber  = body.message?.call?.customer?.number;
 
-            context.log(`Event: ${eventType} | Caller: ${callerNumber || 'N/A'}`);
+            context.log(`[WEBHOOK] Event: ${eventType} | Caller: ${callerNumber || 'N/A'}`);
 
-            // Authenticate with Microsoft Entra ID
+            // ── Authenticate with Microsoft Entra ID ──
             const accessToken = await getAccessToken();
             if (!accessToken) {
-                context.log('AUTH FAILED: no access token returned');
+                context.log('[WEBHOOK] AUTH FAILED: no access token returned');
                 return { status: 500, jsonBody: { error: "Authentication with Entra ID failed." } };
             }
+            context.log('[WEBHOOK] Entra ID token acquired.');
 
-            // Resolve caller identity and role
+            // ── Resolve caller identity ──
             let employeeName = "Employee";
-            let jobTitle     = "";
+            let callerId     = null;
 
             if (callerNumber) {
                 const caller = await lookupCaller(accessToken, callerNumber);
-                context.log(`User lookup result: ${JSON.stringify(caller)}`);
+                context.log(`[WEBHOOK] User lookup result: ${JSON.stringify(caller)}`);
 
                 if (!caller) {
-                    context.log(`CALLER NOT FOUND in Entra ID: ${callerNumber}`);
-                    return { status: 200, jsonBody: { error: "Access denied. Number not found in Entra ID." } };
+                    context.log(`[WEBHOOK] CALLER NOT FOUND in Entra ID: ${callerNumber}`);
+                    // Don't block — allow the call to proceed but search will be limited
+                    // For assistant-request, we still return config so the user hears the greeting
+                    if (eventType === 'assistant-request') {
+                        context.log('[WEBHOOK] Returning assistant config despite unidentified caller.');
+                        const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+                        const publicUrl = host ? `https://${host}/api/vapiWebhook` : undefined;
+                        return { status: 200, jsonBody: buildAssistantConfig(employeeName, publicUrl) };
+                    }
+                    // For tool-calls from an unidentified caller, return a clear message
+                    return {
+                        status: 200,
+                        jsonBody: {
+                            results: [{
+                                toolCallId: body.message?.toolCallList?.[0]?.id || body.message?.toolCalls?.[0]?.id || "unknown",
+                                result: "I'm sorry, but I couldn't verify your identity in our directory. Please contact IT support to ensure your phone number is registered."
+                            }]
+                        }
+                    };
                 }
 
                 employeeName = caller.displayName;
-                jobTitle     = caller.jobTitle;
-                context.log(`Identified: ${employeeName} | Role: ${jobTitle}`);
+                callerId     = caller.id;
+                context.log(`[WEBHOOK] Identified: ${employeeName} | ID: ${callerId}`);
             } else {
-                context.log('WARNING: No caller number in payload — skipping identity lookup.');
+                context.log('[WEBHOOK] WARNING: No caller number in payload — skipping identity lookup.');
             }
 
-            // EVENT A: incoming call — return assistant configuration
+            // ── EVENT A: assistant-request — return assistant configuration ──
             if (eventType === 'assistant-request') {
-                context.log(`Returning assistant config for: ${employeeName}`);
-                return { status: 200, jsonBody: buildAssistantConfig(employeeName) };
+                context.log(`[WEBHOOK] Returning assistant config for: ${employeeName}`);
+
+                const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+                const publicUrl = host ? `https://${host}/api/vapiWebhook` : undefined;
+                context.log(`[WEBHOOK] Server URL for tool callbacks: ${publicUrl || 'NOT RESOLVED'}`);
+
+                return { status: 200, jsonBody: buildAssistantConfig(employeeName, publicUrl) };
             }
 
-            // EVENT B: AI invoked a tool
+            // ── EVENT B: tool-calls — AI invoked a tool ──
             if (eventType === 'tool-calls') {
                 const toolCall = body.message.toolCallList?.[0] || body.message.toolCalls?.[0];
 
                 if (!toolCall) {
-                    context.log(`ERROR: No tool call found. Keys: ${Object.keys(body.message)}`);
-                    return { status: 200, jsonBody: { message: "No tool call found" } };
+                    context.log(`[WEBHOOK] ERROR: No tool call found. Message keys: ${Object.keys(body.message)}`);
+                    return {
+                        status: 200,
+                        jsonBody: {
+                            results: [{
+                                toolCallId: "unknown",
+                                result: "I encountered an internal error. Please try asking your question again."
+                            }]
+                        }
+                    };
                 }
 
-                context.log(`Tool called: ${toolCall.function.name}`);
+                const toolCallId = toolCall.id;
+                context.log(`[WEBHOOK] Tool called: ${toolCall.function?.name} | toolCallId: ${toolCallId}`);
 
-                if (toolCall.function.name === 'search_sharepoint') {
-                    const args = typeof toolCall.function.arguments === 'string'
-                        ? JSON.parse(toolCall.function.arguments)
-                        : toolCall.function.arguments;
-
-                    context.log(`Search query: "${args.query}" | Role: "${jobTitle}"`);
-
-                    const result = await searchSharePoint(accessToken, args.query, jobTitle);
-
-                    if (result.error) {
-                        context.log(`SEARCH API ERROR: ${JSON.stringify(result.error)}`);
+                if (toolCall.function?.name === 'search_sharepoint') {
+                    let args;
+                    try {
+                        args = typeof toolCall.function.arguments === 'string'
+                            ? JSON.parse(toolCall.function.arguments)
+                            : toolCall.function.arguments;
+                    } catch (parseErr) {
+                        context.log(`[WEBHOOK] ERROR: Failed to parse tool arguments: ${parseErr.message}`);
                         return {
                             status: 200,
                             jsonBody: {
-                                results: [{ toolCallId: toolCall.id, result: "The search system encountered an error. Please try again." }]
+                                results: [{ toolCallId, result: "I had trouble understanding the request. Could you rephrase your question?" }]
                             }
                         };
                     }
 
-                    context.log(`Returning to AI: ${result.text.length} chars`);
+                    context.log(`[WEBHOOK] Search query: "${args.query}" | Caller ID: "${callerId}"`);
+
+                    if (!callerId) {
+                        context.log('[WEBHOOK] CRITICAL: callerId is null at search time — identity lookup must have failed.');
+                    }
+
+                    const result = await searchSharePoint(args.query, callerId);
+
+                    // result has either { text: "..." } or { error: "..." }
+                    if (result.error) {
+                        context.log(`[WEBHOOK] SEARCH ERROR: ${result.error}`);
+                        return {
+                            status: 200,
+                            jsonBody: {
+                                results: [{
+                                    toolCallId,
+                                    result: "I'm having trouble accessing the document system right now. Please try again in a moment."
+                                }]
+                            }
+                        };
+                    }
+
+                    context.log(`[WEBHOOK] Search success: returning ${result.text.length} chars to AI.`);
                     return {
                         status: 200,
-                        jsonBody: { results: [{ toolCallId: toolCall.id, result: result.text }] }
+                        jsonBody: {
+                            results: [{
+                                toolCallId,
+                                result: result.text
+                            }]
+                        }
                     };
                 }
+
+                // Unknown tool name
+                context.log(`[WEBHOOK] Unknown tool: ${toolCall.function?.name}`);
+                return {
+                    status: 200,
+                    jsonBody: {
+                        results: [{
+                            toolCallId,
+                            result: "That function is not available."
+                        }]
+                    }
+                };
             }
 
-            context.log(`Event type "${eventType}" not handled — ignoring.`);
+            // ── Unhandled event types ──
+            context.log(`[WEBHOOK] Event type "${eventType}" not handled — ignoring.`);
             return { status: 200, jsonBody: { message: "Event ignored" } };
 
         } catch (error) {
-            context.log(`FATAL ERROR: ${error.message}`);
-            context.log(`Stack: ${error.stack}`);
+            context.log(`[WEBHOOK] FATAL ERROR: ${error.message}`);
+            context.log(`[WEBHOOK] Stack: ${error.stack}`);
             return { status: 500, jsonBody: { error: error.message } };
         }
     }

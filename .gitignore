@@ -3,3 +3,4 @@ node_modules/
 graphify-out/
 .claude/
 CLAUDE.md
+local.settings.json

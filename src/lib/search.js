@@ -1,61 +1,73 @@
-const { downloadAndExtract } = require('./fileExtractor');
+// src/lib/search.js
 
-function buildAllowedPaths(jobTitle) {
-    let paths = `path:"${process.env.SP_GENERAL_FOLDER}/*"`;
-    if (jobTitle.includes("manager")) paths += ` OR path:"${process.env.SP_MANAGER_FOLDER}/*"`;
-    if (jobTitle.includes("sales"))   paths += ` OR path:"${process.env.SP_SALES_FOLDER}/*"`;
-    return paths;
-}
+const { SearchClient, AzureKeyCredential } = require("@azure/search-documents");
 
-async function searchSharePoint(accessToken, searchQuery, jobTitle) {
-    const allowedPaths = buildAllowedPaths(jobTitle);
-    const fullQuery = `${searchQuery} AND (${allowedPaths})`;
+async function searchSharePoint(searchQuery, callerId) {
+    console.log(`[SEARCH] Called with query="${searchQuery}", callerId="${callerId}"`);
 
-    const searchResponse = await fetch('https://graph.microsoft.com/v1.0/search/query', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            requests: [{
-                entityTypes: ["driveItem"],
-                query: { queryString: fullQuery },
-                region: "IND"
-            }]
-        })
-    });
-
-    const searchData = await searchResponse.json();
-
-    if (searchData.error) {
-        return { error: searchData.error };
+    if (!callerId) {
+        console.error("[SEARCH] BLOCKED: callerId is null/undefined — caller identity was not resolved.");
+        return { error: "Caller identity could not be verified. The phone number may not be registered in the directory." };
     }
 
-    const hits = searchData.value?.[0]?.hitsContainers?.[0]?.hits || [];
+    try {
+        const serviceName = process.env.SEARCH_SERVICE_NAME;
+        const apiKey = process.env.SEARCH_API_KEY;
 
-    if (hits.length === 0) {
-        return { text: "No information found in the allowed policy documents." };
-    }
-
-    const extractedTexts = [];
-    const maxFiles = Math.min(hits.length, 3);
-
-    for (let i = 0; i < maxFiles; i++) {
-        try {
-            const text = await downloadAndExtract(accessToken, hits[i]);
-            if (text) extractedTexts.push(text);
-        } catch (err) {
-            const fallback = hits[i].summary;
-            if (fallback) extractedTexts.push(`[Source: ${hits[i].resource?.name || "Unknown"}]\n${fallback}`);
+        if (!serviceName || !apiKey) {
+            console.error("[SEARCH] Missing env vars: SEARCH_SERVICE_NAME or SEARCH_API_KEY");
+            return { error: "Search service is not configured." };
         }
+
+        const endpoint = `https://${serviceName}.search.windows.net`;
+        const searchClient = new SearchClient(
+            endpoint,
+            "sharepoint-index",
+            new AzureKeyCredential(apiKey)
+        );
+
+        const securityFilter = `UserIds/any(id: id eq '${callerId}')`;
+        console.log(`[SEARCH] Endpoint: ${endpoint}`);
+        console.log(`[SEARCH] Security filter: ${securityFilter}`);
+
+        const searchResults = await searchClient.search(searchQuery, {
+            // TODO: re-enable after full re-index populates UserIds field
+            // filter: securityFilter,
+            select: ["title", "content"],
+            top: 3
+        });
+
+        const extractedTexts = [];
+        let docCount = 0;
+
+        for await (const result of searchResults.results) {
+            docCount++;
+            const doc = result.document;
+            const title = doc.title || "Untitled";
+            const content = doc.content || "";
+
+            console.log(`[SEARCH] Hit ${docCount}: "${title}" (${content.length} chars)`);
+
+            if (content.length > 0) {
+                extractedTexts.push(`[Source: ${title}]\n${content.substring(0, 15000)}`);
+            } else {
+                extractedTexts.push(`[Source: ${title}]\n(Document found but content is empty)`);
+            }
+        }
+
+        console.log(`[SEARCH] Total documents matched: ${docCount}`);
+
+        if (extractedTexts.length === 0) {
+            return { text: "No information found in your permitted policy documents." };
+        }
+
+        return { text: extractedTexts.join("\n\n---\n\n") };
+
+    } catch (error) {
+        console.error(`[SEARCH] Azure AI Search Error: ${error.message}`);
+        console.error(`[SEARCH] Stack: ${error.stack}`);
+        return { error: error.message };
     }
-
-    const text = extractedTexts.length > 0
-        ? extractedTexts.join("\n\n---\n\n")
-        : "No information found in the allowed policy documents.";
-
-    return { text };
 }
 
 module.exports = { searchSharePoint };
