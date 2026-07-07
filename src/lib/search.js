@@ -32,7 +32,7 @@ async function searchSharePoint(searchQuery, callerId) {
 
         const searchResults = await searchClient.search(searchQuery, {
             // TODO: re-enable after full re-index populates UserIds field
-            // filter: securityFilter,
+            filter: securityFilter,
             select: ["title", "content"],
             top: 3
         });

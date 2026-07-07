@@ -33,7 +33,7 @@ function buildAssistantConfig(employeeName, serverUrl) {
     return {
         assistant: {
             name: "Enterprise Agent",
-            firstMessage: `Authentication successful. Welcome, ${employeeName}. I can answer questions about your company policies. How can I help you today?`,
+            firstMessage: `Hello, ${employeeName}.How can I help you today?`,
             model: {
                 provider: "openai",
                 model: "gpt-4o",
