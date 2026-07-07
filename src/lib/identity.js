@@ -122,4 +122,25 @@ async function lookupCaller(accessToken, callerNumber) {
   };
 }
 
-module.exports = { lookupCaller };
+async function getUserGroupIds(accessToken, userId) {
+  console.log(`[IDENTITY] Fetching group memberships for: ${userId}`);
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/users/${userId}/memberOf?$select=id&$top=100`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ConsistencyLevel: "eventual",
+      },
+    }
+  );
+  const data = await res.json();
+  if (data.error) {
+    console.error(`[IDENTITY] Group lookup failed: ${JSON.stringify(data.error)}`);
+    return [];
+  }
+  const ids = (data.value || []).map((g) => g.id);
+  console.log(`[IDENTITY] User is member of ${ids.length} group(s)`);
+  return ids;
+}
+
+module.exports = { lookupCaller, getUserGroupIds };

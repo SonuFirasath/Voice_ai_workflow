@@ -117,7 +117,7 @@ app.http('vapiWebhook', {
                         context.log('[WEBHOOK] CRITICAL: callerId is null at search time — identity lookup must have failed.');
                     }
 
-                    const result = await searchSharePoint(args.query, callerId);
+                    const result = await searchSharePoint(args.query, callerId, accessToken);
 
                     // result has either { text: "..." } or { error: "..." }
                     if (result.error) {

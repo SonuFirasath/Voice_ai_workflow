@@ -19,11 +19,9 @@ function buildAssistantConfig(employeeName, serverUrl) {
                 required: ["query"]
             }
         },
-        // Tells VAPI to wait for the tool result before the AI responds
         async: false
     };
 
-    // Only add server config if we have a valid URL
     if (serverUrl) {
         toolConfig.server = {
             url: serverUrl
@@ -33,14 +31,14 @@ function buildAssistantConfig(employeeName, serverUrl) {
     return {
         assistant: {
             name: "Enterprise Agent",
-            firstMessage: `Hello, ${employeeName}.How can I help you today?`,
+            firstMessage: `Hello, ${employeeName}. How can I help you today?`,
             model: {
                 provider: "openai",
                 model: "gpt-4o",
                 messages: [
                     {
                         role: "system",
-                        content: `You are a corporate policy assistant for ${employeeName}. Your ONLY job is to answer questions using the search_sharepoint tool. 
+                        content: `You are a corporate policy assistant for ${employeeName}. Your ONLY job is to answer questions using the search_sharepoint tool.
 
 RULES:
 1. For EVERY user question, call the search_sharepoint tool first.
