@@ -66,7 +66,8 @@ async function searchSharePoint(searchQuery, callerId, accessToken) {
             return { text: "No information found in the policy documents you have access to." };
         }
 
-        return { text: extractedTexts.join("\n\n---\n\n") };
+        const groundingHeader = "ANSWER ONLY USING THE TEXT IN THESE EXCERPTS. DO NOT USE TRAINING DATA:\n\n";
+        return { text: groundingHeader + extractedTexts.join("\n\n---\n\n") };
 
     } catch (error) {
         console.error(`[SEARCH] Azure AI Search Error: ${error.message}`);

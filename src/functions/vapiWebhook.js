@@ -19,6 +19,12 @@ app.http('vapiWebhook', {
 
             context.log(`[WEBHOOK] Event: ${eventType} | Caller: ${callerNumber || 'N/A'}`);
 
+            // Ignore events we don't handle — skip all API calls for them
+            if (eventType !== 'assistant-request' && eventType !== 'tool-calls') {
+                context.log(`[WEBHOOK] Event type "${eventType}" not handled — ignoring.`);
+                return { status: 200, jsonBody: { message: "Event ignored" } };
+            }
+
             // ── Authenticate with Microsoft Entra ID ──
             const accessToken = await getAccessToken();
             if (!accessToken) {
