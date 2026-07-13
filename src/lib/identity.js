@@ -131,11 +131,13 @@ async function getUserGroupIds(accessToken, userId) {
         Authorization: `Bearer ${accessToken}`,
         ConsistencyLevel: "eventual",
       },
-    }
+    },
   );
   const data = await res.json();
   if (data.error) {
-    console.error(`[IDENTITY] Group lookup failed: ${JSON.stringify(data.error)}`);
+    console.error(
+      `[IDENTITY] Group lookup failed: ${JSON.stringify(data.error)}`,
+    );
     return [];
   }
   const ids = (data.value || []).map((g) => g.id);
