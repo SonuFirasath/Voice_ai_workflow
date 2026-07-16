@@ -1,0 +1,3 @@
+[SCHEDULER] Meeting Schedular listening on port 3000
+[SCHEDULER] check_availability args: date="tomorrow" time="2pm"
+[CALENDAR] Checking availability on 2026-07-16 at 14:00:00

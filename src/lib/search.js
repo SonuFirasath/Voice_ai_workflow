@@ -1,104 +1,87 @@
 // src/lib/search.js
 
-const { SearchClient, AzureKeyCredential } = require("@azure/search-documents");
-const { getUserGroupIds } = require("./identity");
+// We need the Graph access token to authenticate the search
+const { getAccessToken } = require('./auth');
 
-async function searchSharePoint(searchQuery, callerId, accessToken) {
-  console.log(`[SEARCH] query="${searchQuery}" | callerId="${callerId}"`);
+async function searchSharePoint(searchQuery, callerId) {
+    // callerId is intentionally ignored for this demo to search tenant-wide
+    console.log(`[SEARCH] Demo Mode: Bypassing Azure AI. Querying Graph API for "${searchQuery}"`);
 
-  if (!callerId) {
-    console.error(
-      "[SEARCH] BLOCKED: callerId is null/undefined — caller identity was not resolved.",
-    );
-    return {
-      error:
-        "Caller identity could not be verified. The phone number may not be registered in the directory.",
-    };
-  }
+    try {
+        const accessToken = await getAccessToken();
 
-  try {
-    const serviceName = process.env.SEARCH_SERVICE_NAME;
-    const apiKey = process.env.SEARCH_API_KEY;
+        if (!accessToken) {
+            console.error("[SEARCH] No access token available.");
+            return { error: "Authentication with Microsoft Graph failed." };
+        }
 
-    if (!serviceName || !apiKey) {
-      console.error(
-        "[SEARCH] Missing env vars: SEARCH_SERVICE_NAME or SEARCH_API_KEY",
-      );
-      return { error: "Search service is not configured." };
+        // The global Microsoft Graph Search endpoint
+        const endpoint = `https://graph.microsoft.com/v1.0/search/query`;
+        
+        const requestBody = {
+            requests: [
+                {
+                    // Targets SharePoint document libraries and lists
+                    entityTypes: ["driveItem", "listItem"],
+                    query: {
+                        queryString: searchQuery
+                    },
+                    // We request the name and URL; Graph returns a 'summary' snippet automatically
+                    fields: ["name", "title", "webUrl"]
+                }
+            ]
+        };
+
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error(`[SEARCH] Graph API Error:`, data.error);
+            return { error: data.error.message };
+        }
+
+        // Drill down into the Graph API response structure to find the hits
+        const hits = data.value?.[0]?.hitsContainers?.[0]?.hits || [];
+        
+        if (hits.length === 0) {
+            return { text: "No information found in the SharePoint directory." };
+        }
+
+        const extractedTexts = [];
+        let docCount = 0;
+
+        // Loop through the top 3 hits
+        for (const hit of hits.slice(0, 3)) { 
+            docCount++;
+            const resource = hit.resource;
+            const title = resource.name || resource.title || "Untitled";
+            
+            // Graph Search returns an HTML-formatted snippet highlighting the search match
+            const summary = hit.summary || "(No text summary available)";
+            
+            // Microsoft inserts <c0> tags to highlight words. This cleans them out.
+            const cleanSummary = summary.replace(/<[^>]*>?/gm, '');
+
+            console.log(`[SEARCH] Hit ${docCount}: "${title}"`);
+            
+            extractedTexts.push(`[Source: ${title}]\nSummary: ${cleanSummary}`);
+        }
+
+        return { text: extractedTexts.join("\n\n---\n\n") };
+
+    } catch (error) {
+        console.error(`[SEARCH] Microsoft Graph API Error: ${error.message}`);
+        console.error(`[SEARCH] Stack: ${error.stack}`);
+        return { error: error.message };
     }
-
-    // Get the caller's Entra group memberships
-    const groupIds = await getUserGroupIds(accessToken, callerId);
-
-    if (groupIds.length === 0) {
-      console.log(
-        "[SEARCH] User has no group memberships — access denied to all documents.",
-      );
-      return {
-        text: "I'm sorry, I could not find any policy documents that you have access to.",
-      };
-    }
-
-    // Build OData filter: document must be accessible to at least one of the caller's groups
-    const groupFilter = groupIds
-      .map((id) => `GroupIds/any(g: g eq '${id}')`)
-      .join(" or ");
-
-    console.log(
-      `[SEARCH] Applying GroupIds filter across ${groupIds.length} group(s)`,
-    );
-
-    const endpoint = `https://${serviceName}.search.windows.net`;
-    const searchClient = new SearchClient(
-      endpoint,
-      "sharepoint-index",
-      new AzureKeyCredential(apiKey),
-    );
-
-    const searchResults = await searchClient.search(searchQuery, {
-      filter: groupFilter,
-      select: ["title", "content"],
-      top: 3,
-    });
-
-    const extractedTexts = [];
-
-    for await (const result of searchResults.results) {
-      const doc = result.document;
-      const title = doc.title || "Untitled";
-      const content = doc.content || "";
-
-      console.log(`[SEARCH] Hit: "${title}" (${content.length} chars)`);
-
-      if (content.length > 0) {
-        extractedTexts.push(
-          `[Source: ${title}]\n${content.substring(0, 15000)}`,
-        );
-      } else {
-        extractedTexts.push(
-          `[Source: ${title}]\n(Document found but content is empty)`,
-        );
-      }
-    }
-
-    console.log(
-      `[SEARCH] Returning ${extractedTexts.length} document(s) after group filter.`,
-    );
-
-    if (extractedTexts.length === 0) {
-      return {
-        text: "No information found in the policy documents you have access to.",
-      };
-    }
-
-    const groundingHeader =
-      "ANSWER ONLY USING THE TEXT IN THESE EXCERPTS. DO NOT USE TRAINING DATA:\n\n";
-    return { text: groundingHeader + extractedTexts.join("\n\n---\n\n") };
-  } catch (error) {
-    console.error(`[SEARCH] Azure AI Search Error: ${error.message}`);
-    console.error(`[SEARCH] Stack: ${error.stack}`);
-    return { error: error.message };
-  }
 }
 
 module.exports = { searchSharePoint };
