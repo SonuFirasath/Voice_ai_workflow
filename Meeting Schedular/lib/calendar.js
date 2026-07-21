@@ -41,11 +41,11 @@ function addMinutes(dateStr, timeStr, minutesToAdd) {
   return { dateStr: newDateStr, timeStr: `${pad(Math.floor(total / 60))}:${pad(total % 60)}:${pad(s || 0)}` };
 }
 
-async function getScheduleItems(accessToken, dateStr) {
+async function getSchedules(accessToken, dateStr, emails) {
   const endpoint = `https://graph.microsoft.com/v1.0/users/${TARGET_EMAIL}/calendar/getSchedule`;
 
   const requestBody = {
-    schedules: [TARGET_EMAIL],
+    schedules: emails,
     startTime: { dateTime: `${dateStr}T${WORKING_HOURS_START}`, timeZone: TIME_ZONE },
     endTime: { dateTime: `${dateStr}T${WORKING_HOURS_END}`, timeZone: TIME_ZONE },
     availabilityViewInterval: 30,
@@ -68,29 +68,40 @@ async function getScheduleItems(accessToken, dateStr) {
     return { error: "Failed to access the calendar schedule." };
   }
 
-  return { scheduleItems: data.value?.[0]?.scheduleItems || [] };
+  return { schedules: data.value || [] };
 }
 
-async function checkAvailability(accessToken, dateStr, timeStr, durationMinutes = 30) {
-  console.log(`[CALENDAR] Checking availability on ${dateStr} at ${timeStr}`);
+// Checks the organizer's calendar plus every attendee's calendar for the
+// requested slot. `free` is true only if nobody involved has a conflict.
+async function checkAvailability(accessToken, dateStr, timeStr, durationMinutes = 30, attendeeEmails = []) {
+  console.log(`[CALENDAR] Checking availability on ${dateStr} at ${timeStr} for ${1 + attendeeEmails.length} mailbox(es)`);
 
-  const { scheduleItems, error } = await getScheduleItems(accessToken, dateStr);
+  const emails = [TARGET_EMAIL, ...attendeeEmails];
+  const { schedules, error } = await getSchedules(accessToken, dateStr, emails);
   if (error) return { error };
 
   const requestedStart = timeStringToMinutes(timeStr);
   const requestedEnd = requestedStart + durationMinutes;
 
-  const busySlots = scheduleItems.map(
-    (item) => `${item.start.dateTime.slice(11, 16)}-${item.end.dateTime.slice(11, 16)}`,
-  );
+  const conflicts = [];
+  for (const schedule of schedules) {
+    const items = schedule.scheduleItems || [];
+    const busySlots = [];
 
-  const conflict = scheduleItems.some((item) => {
-    const busyStart = extractMinutesFromDateTime(item.start.dateTime);
-    const busyEnd = extractMinutesFromDateTime(item.end.dateTime);
-    return requestedStart < busyEnd && busyStart < requestedEnd;
-  });
+    for (const item of items) {
+      const busyStart = extractMinutesFromDateTime(item.start.dateTime);
+      const busyEnd = extractMinutesFromDateTime(item.end.dateTime);
+      if (requestedStart < busyEnd && busyStart < requestedEnd) {
+        busySlots.push(`${item.start.dateTime.slice(11, 16)}-${item.end.dateTime.slice(11, 16)}`);
+      }
+    }
 
-  return { free: !conflict, busySlots };
+    if (busySlots.length > 0) {
+      conflicts.push({ email: schedule.scheduleId, busySlots });
+    }
+  }
+
+  return { free: conflicts.length === 0, conflicts };
 }
 
 async function bookMeeting(accessToken, { dateStr, timeStr, durationMinutes = 30, title, attendeeEmails = [] }) {
