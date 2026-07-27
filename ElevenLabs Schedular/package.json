@@ -1,0 +1,16 @@
+{
+  "name": "elevenlabs-schedular",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone tool server for ElevenLabs Conversational AI: checks Microsoft 365 calendar availability and books meetings.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
