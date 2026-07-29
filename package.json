@@ -13,6 +13,6 @@
   "dependencies": {
     "@azure/functions": "^4.16.1",
     "@azure/search-documents": "^13.0.0",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^1.1.1"
   }
 }
