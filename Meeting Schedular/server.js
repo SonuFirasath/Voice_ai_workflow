@@ -10,7 +10,7 @@ const { getAccessToken } = require("./lib/auth");
 const { resolveDate, resolveTime } = require("./lib/dateResolver");
 const { resolveAttendees } = require("./lib/directory");
 const { checkAvailability, bookMeeting } = require("./lib/calendar");
-const { lookupCallerByPhone, getUserMpin } = require("./lib/callerIdentity");
+const { resolveCaller, getUserMpin } = require("./lib/callerIdentity");
 const { isVerified, isLockedOut, markVerified, recordFailedAttempt } = require("./lib/callState");
 
 const app = express();
@@ -61,8 +61,10 @@ app.post("/verify-pin", async (req, res) => {
 
   for (const toolCall of toolCalls) {
     try {
-      const { pin } = parseArgs(toolCall);
-      console.log(`[SCHEDULER] verify_pin args: pin="${pin}" callId="${callId}"`);
+      const rawArgs = parseArgs(toolCall);
+      const { pin } = rawArgs;
+      console.log(`[SCHEDULER] verify_pin raw toolCall: ${JSON.stringify(toolCall)}`);
+      console.log(`[SCHEDULER] verify_pin parsed args: ${JSON.stringify(rawArgs)} callId="${callId}"`);
 
       if (!callId) {
         console.warn("[SCHEDULER] verify_pin: no callId on request, cannot track attempts.");
@@ -86,12 +88,6 @@ app.post("/verify-pin", async (req, res) => {
         continue;
       }
 
-      if (!callerNumber) {
-        console.warn("[SCHEDULER] verify_pin: no callerNumber on request (message.call.customer.number missing).");
-        results.push({ toolCallId: toolCall.id, result: "Could not identify the caller's phone number. Cannot verify PIN." });
-        continue;
-      }
-
       const accessToken = await getAccessToken();
       if (!accessToken) {
         console.warn("[SCHEDULER] verify_pin: getAccessToken() failed.");
@@ -99,9 +95,9 @@ app.post("/verify-pin", async (req, res) => {
         continue;
       }
 
-      const caller = await lookupCallerByPhone(accessToken, callerNumber);
+      const caller = await resolveCaller(accessToken, callerNumber);
       if (!caller) {
-        console.warn(`[SCHEDULER] verify_pin: no employee matched for ${callerNumber}`);
+        console.warn(`[SCHEDULER] verify_pin: no employee matched (callerNumber=${callerNumber || "none"})`);
         results.push({
           toolCallId: toolCall.id,
           result: "This caller could not be matched to an employee record. End the call and tell them their number isn't recognized.",

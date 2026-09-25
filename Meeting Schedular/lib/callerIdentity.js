@@ -123,4 +123,28 @@ async function getUserMpin(accessToken, userId) {
   return typeof value === "number" ? value : null;
 }
 
-module.exports = { lookupCallerByPhone, lookupUserByEmail, getUserMpin };
+// Resolves the caller for a verify_pin request. Real phone calls always use
+// the actual caller number. VAPI's dashboard web-test calls never attach a
+// customer number at all, so there's nothing to look up by phone in that
+// case - as a WEB-TEST-MODE-ONLY fallback, if no number is present and
+// ENABLE_WEB_TEST_MODE is explicitly turned on, fall back to a fixed test
+// identity (TEST_CALLER_EMAIL) so the PIN flow can still be exercised from
+// the dashboard. This never overrides a real phone number, and is a no-op
+// unless both env vars are set.
+async function resolveCaller(accessToken, callerNumber) {
+  if (callerNumber) {
+    return lookupCallerByPhone(accessToken, callerNumber);
+  }
+
+  if (process.env.ENABLE_WEB_TEST_MODE === "true" && process.env.TEST_CALLER_EMAIL) {
+    console.warn(
+      `[CALLER-IDENTITY] WEB TEST MODE: no phone number on this call, falling back to TEST_CALLER_EMAIL (${process.env.TEST_CALLER_EMAIL}).`,
+    );
+    return lookupUserByEmail(accessToken, process.env.TEST_CALLER_EMAIL);
+  }
+
+  console.log("[CALLER-IDENTITY] No caller phone number on this call, and web test mode is not enabled.");
+  return null;
+}
+
+module.exports = { lookupCallerByPhone, lookupUserByEmail, getUserMpin, resolveCaller };
